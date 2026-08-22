@@ -3,8 +3,16 @@
 // Getform:    'https://getform.io/f/your-form-id'
 // Custom API: 'https://api.yourdomain.com/contact' (must accept JSON POST, return 2xx on success)
 const FORM_ENDPOINT = 'https://example.com/api/contact';
+// LEAD_ENDPOINT: replace with your email-capture backend before deploying (same contract as FORM_ENDPOINT).
+const LEAD_ENDPOINT = 'https://example.com/api/leads';
 
 const prefersReducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Timestamp used by the bot time-trap: a submission arriving faster than a human could
+// plausibly fill the form is treated the same as a tripped honeypot.
+const pageLoadedAt = Date.now();
+const MIN_HUMAN_FILL_TIME_MS = 1500;
+const submittedTooFast = () => Date.now() - pageLoadedAt < MIN_HUMAN_FILL_TIME_MS;
 
 // Wires the hamburger button to open/close the mobile nav menu
 function initNav() {
@@ -237,7 +245,7 @@ function initFormSubmit() {
     e.preventDefault();
 
     const honeypot = form.elements.namedItem('website');
-    if (honeypot && honeypot.value) {
+    if ((honeypot && honeypot.value) || submittedTooFast()) {
       showConfirmation();
       return;
     }
@@ -282,6 +290,178 @@ function initFormSubmit() {
   if (resetBtn) resetBtn.addEventListener('click', resetForm);
 }
 
+// Handles the lead-magnet email capture: validation, honeypot/time-trap, and reveal of the download
+function initLeadMagnetForm() {
+  const form = document.getElementById('lead-magnet-form');
+  if (!form) return;
+
+  const emailField = document.getElementById('lead-email');
+  const errorEl = document.getElementById('lead-email-error');
+  const successEl = document.getElementById('lead-magnet-success');
+
+  const showError = (message) => {
+    emailField.setAttribute('aria-invalid', 'true');
+    errorEl.textContent = message;
+  };
+  const clearError = () => {
+    emailField.setAttribute('aria-invalid', 'false');
+    errorEl.textContent = '';
+  };
+
+  emailField.addEventListener('blur', () => {
+    if (!emailField.value.trim()) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailField.value.trim())) {
+      showError('Please enter a valid email address.');
+    } else {
+      clearError();
+    }
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const honeypot = form.elements.namedItem('lead-company');
+    const email = emailField.value.trim();
+
+    if ((honeypot && honeypot.value) || submittedTooFast()) {
+      form.hidden = true;
+      successEl.hidden = false;
+      successEl.focus();
+      return;
+    }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showError('Please enter a valid email address.');
+      emailField.focus();
+      return;
+    }
+    clearError();
+
+    try {
+      await fetch(LEAD_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, source: 'it-security-checklist' }),
+      });
+    } catch (err) {
+      // Non-fatal: the checklist is still viewable client-side even if the lead capture
+      // request fails, so a network error here shouldn't block the user.
+    }
+
+    form.hidden = true;
+    successEl.hidden = false;
+    successEl.focus();
+  });
+}
+
+// Opens the ebook lead-capture dialog 10s after load; suppressed for the rest of the
+// session once shown, submitted, or dismissed.
+const EBOOK_POPUP_DELAY_MS = 10000;
+const EBOOK_POPUP_STORAGE_KEY = 'nexova-ebook-popup-dismissed';
+
+function initEbookPopup() {
+  const dialog = document.getElementById('ebook-popup');
+  if (!dialog || typeof dialog.showModal !== 'function') return;
+
+  const alreadyDismissed = () => {
+    try {
+      return sessionStorage.getItem(EBOOK_POPUP_STORAGE_KEY) === '1';
+    } catch (err) {
+      return false;
+    }
+  };
+  if (alreadyDismissed()) return;
+
+  const markDismissed = () => {
+    try {
+      sessionStorage.setItem(EBOOK_POPUP_STORAGE_KEY, '1');
+    } catch (err) {
+      // Storage unavailable (e.g. private browsing) — the popup may reappear, which is fine.
+    }
+  };
+
+  const form = document.getElementById('ebook-popup-form');
+  const emailField = document.getElementById('ebook-email');
+  const errorEl = document.getElementById('ebook-email-error');
+  const successEl = document.getElementById('ebook-popup-success');
+
+  const showError = (message) => {
+    emailField.setAttribute('aria-invalid', 'true');
+    errorEl.textContent = message;
+  };
+  const clearError = () => {
+    emailField.setAttribute('aria-invalid', 'false');
+    errorEl.textContent = '';
+  };
+
+  dialog.addEventListener('close', markDismissed);
+
+  // Native <dialog> doesn't close on backdrop click by default; treat a click outside
+  // the dialog's own box (i.e. on the backdrop) as a dismissal.
+  dialog.addEventListener('click', (e) => {
+    const bounds = dialog.getBoundingClientRect();
+    const inBounds =
+      e.clientX >= bounds.left && e.clientX <= bounds.right &&
+      e.clientY >= bounds.top && e.clientY <= bounds.bottom;
+    if (!inBounds) dialog.close();
+  });
+
+  emailField.addEventListener('blur', () => {
+    if (!emailField.value.trim()) return;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailField.value.trim())) {
+      showError('Please enter a valid email address.');
+    } else {
+      clearError();
+    }
+  });
+
+  let popupOpenedAt = 0;
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const honeypot = form.elements.namedItem('ebook-company');
+    const email = emailField.value.trim();
+    const submittedTooFast = Date.now() - popupOpenedAt < MIN_HUMAN_FILL_TIME_MS;
+
+    if ((honeypot && honeypot.value) || submittedTooFast) {
+      markDismissed();
+      form.hidden = true;
+      successEl.hidden = false;
+      successEl.focus();
+      return;
+    }
+
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      showError('Please enter a valid email address.');
+      emailField.focus();
+      return;
+    }
+    clearError();
+
+    try {
+      await fetch(LEAD_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, source: 'popup-ebook' }),
+      });
+    } catch (err) {
+      // Non-fatal: still show the success state client-side even if the request fails.
+    }
+
+    markDismissed();
+    form.hidden = true;
+    successEl.hidden = false;
+    successEl.focus();
+  });
+
+  setTimeout(() => {
+    if (alreadyDismissed() || dialog.open) return;
+    popupOpenedAt = Date.now();
+    dialog.showModal();
+  }, EBOOK_POPUP_DELAY_MS);
+}
+
 // Sets the footer's copyright year to the current year
 function initFooterYear() {
   const yearEl = document.getElementById('current-year');
@@ -295,6 +475,8 @@ function init() {
   initCarousel();
   initFormValidation();
   initFormSubmit();
+  initLeadMagnetForm();
+  initEbookPopup();
   initFooterYear();
 }
 
